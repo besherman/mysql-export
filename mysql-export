@@ -69,20 +69,20 @@ fi
 database=${!#}
 
 if [ -z "$output_file" ]; then
-	echo "-r is missing. Output file must be specified, stdout not supported."
-	echo
-	exit 1
+	output_file=${database}-$(date +%Y-%m-%d).sql
+	if [ -n "$compress" ]; then
+		output_file=${output_file}.gz
+	fi
+
 fi
 
 
-struct_tmp_file=$(mktemp tmp_mysql-export_struct.sql.XXXXX)
-fixed_struct_tmp_file=$(mktemp tmp_mysql-export_struct.sql.XXXXX)
-data_tmp_file=$(mktemp tmp_mysql-export_data.sql.XXXXX)
+tmp_file1=$(mktemp tmp_mysql-export.sql.XXXXX)
+tmp_file2=$(mktemp tmp_mysql-export.sql.XXXXX)
 
 function cleanup() {
-	rm $struct_tmp_file
-	rm $fixed_struct_tmp_file
-	rm $data_tmp_file
+	rm $tmp_file1
+	rm -f $tmp_file2
 }
 
 
@@ -120,7 +120,7 @@ mysqldump_args="$mysqldump_args --hex-blob"
 # Writes every insert as a single line. Normally it would bunch them all
 # up in a very very long line, making it hard to read in a text editor.
 # Be aware that this will make things a lot slower.
-mysqldump_args="$mysqldump_args --skip-extended-insert"
+#mysqldump_args="$mysqldump_args --skip-extended-insert"
 
 # Runs the entire dump in a single transation so that anything that changes
 # during the time that we dump the database will not be included in the
@@ -139,8 +139,8 @@ mysqldump_args="$mysqldump_args $database"
 ###############################################################################
 # dump database structure 
 ###############################################################################
-echo "Dumping database structure..."
-cmd="$mysqldump_path --no-data -r $struct_tmp_file $mysqldump_args" 
+echo "Dumping database..."
+cmd="$mysqldump_path -r $tmp_file1 $mysqldump_args" 
 
 if [ -n "$verbose" ]; then
 	echo $cmd
@@ -154,25 +154,6 @@ if [ $? -ne 0 ]; then
 fi
 
 ###############################################################################
-# dump database data
-###############################################################################
-echo "Dumping database data..."
-cmd="$mysqldump_path --no-create-info -r $data_tmp_file $mysqldump_args"
-
-if [ -n "$verbose" ]; then
-	echo $cmd
-fi
-$cmd
-
-if [ $? -ne 0 ]; then
-   echo "Failed to dump data. Aborting."
-   cleanup
-   exit 3
-fi
-
-
-
-###############################################################################
 # replace charset in tables
 ###############################################################################
 
@@ -180,7 +161,7 @@ fi
 # any references to latin1
 
 echo "Replacing charset..."
-sed "s/DEFAULT CHARACTER SET latin1/DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci/" < $struct_tmp_file | sed "s/DEFAULT CHARSET=latin1/DEFAULT CHARSET=utf8/" > $fixed_struct_tmp_file
+sed "s/DEFAULT CHARACTER SET latin1/DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci/" < $tmp_file1 | sed "s/DEFAULT CHARSET=latin1/DEFAULT CHARSET=utf8/" > $tmp_file2
 
 if [ $? -ne 0 ]; then
    echo "Failed to replace charset. Aborting."
@@ -193,11 +174,11 @@ fi
 # Concatenate files
 ###############################################################################
 
-echo "Building output file..."
+echo "Writing output to $output_file..."
 if [ -z "$compress" ]; then
-	cat $fixed_struct_tmp_file $data_tmp_file > $output_file
+	mv $tmp_file2 $output_file
 else
-	cat $fixed_struct_tmp_file $data_tmp_file | gzip > $output_file
+	cat $tmp_file2 | gzip > $output_file
 fi
 
 cleanup
