@@ -1,0 +1,206 @@
+#!/bin/bash
+#
+# Exports a mysql database to an sql file using a portable and
+# easy to read format.  
+#
+# The output format will be UTF8 and all tables will be converted
+# to UTF8 even if one or more of the tables are in Latin1.
+#
+
+# set the path to the mysqldump executable
+mysqldump_path=/usr/bin/mysqldump
+
+# make sure utf8 is set in the shell, this is
+# relevant later when we use sed
+export LANG="en_US.UTF-8"
+
+
+function print_usage() {
+	echo "Usage: $0 [OPTIONS] database"
+	echo 
+	echo "The following options may be given as the first argument:"
+	echo "  -p Password to use when connecting to server. If password is"
+	echo "     not given it's solicited on the tty."
+	echo "  -r Direct output to a given file."
+	echo "  -u User for login if not current user."
+	echo "  -v Print info about the various stages."
+	echo "  -x Compress the output file with gzip."
+	echo 
+}
+
+# http://wiki.bash-hackers.org/howto/getopts_tutorial
+while getopts ":u:p:r:xv" opt; do
+	case $opt in
+		u)	
+			username=$OPTARG 
+			;;
+		p)
+			password=$OPTARG
+			;;
+		r) 
+			output_file=$OPTARG
+			;;
+		v)
+			verbose=true
+			;;
+		x)
+			compress=true
+			;;
+		\?)
+			echo "Invalid option: -$OPTARG"
+			print_usage
+			exit 1
+			;;
+		\:)
+			echo "Option -$OPTARG requires an argument."
+			print_usage
+			exit 1
+			;;
+	esac
+done
+
+if [ "$#" -ne $OPTIND ]; then
+	echo "You have to specify a database."
+	echo 
+	print_usage
+	exit 1
+fi
+
+database=${!#}
+
+if [ -z "$output_file" ]; then
+	echo "-r is missing. Output file must be specified, stdout not supported."
+	echo
+	exit 1
+fi
+
+
+struct_tmp_file=$(mktemp tmp_mysql-export_struct.sql.XXXXX)
+fixed_struct_tmp_file=$(mktemp tmp_mysql-export_struct.sql.XXXXX)
+data_tmp_file=$(mktemp tmp_mysql-export_data.sql.XXXXX)
+
+function cleanup() {
+	rm $struct_tmp_file
+	rm $fixed_struct_tmp_file
+	rm $data_tmp_file
+}
+
+
+###############################################################################
+# mysqldump settings
+###############################################################################
+mysqldump_args=""
+
+
+# Specify username if given as argument
+if [ -n "$username" ]; then
+	mysqldump_args="$mysqldump_args -u $username"
+fi
+
+# Specify username if given as argument. If not use interactive password. No password not supported.
+if [ -n "$password" ]; then
+	mysqldump_args="$mysqldump_args -p$password"
+else 
+	mysqldump_args="$mysqldump_args -p"
+fi
+
+
+# Overrides the default settings and forces the server to send us data in UTF8.
+# This will set the environment variables character_set_client, 
+# character_set_connection and character_set_results to UTF8. 
+mysqldump_args="$mysqldump_args --default-character-set utf8"
+
+# Do not write SET NAMES statement
+mysqldump_args="$mysqldump_args --skip-set-charset"
+
+# Dump binary columns using hexadecimal notation. This is useful because if
+# anyone tries to change the encoding of the file it will break. 
+mysqldump_args="$mysqldump_args --hex-blob"
+
+# Writes every insert as a single line. Normally it would bunch them all
+# up in a very very long line, making it hard to read in a text editor.
+# Be aware that this will make things a lot slower.
+mysqldump_args="$mysqldump_args --skip-extended-insert"
+
+# Runs the entire dump in a single transation so that anything that changes
+# during the time that we dump the database will not be included in the
+# dump.
+mysqldump_args="$mysqldump_args --single-transaction"
+
+# Forces mysqldump to retrieve rows for a table from the server a row at a 
+# time rather than retrieving the entire row set and buffering it in memory 
+# before writing it out.
+mysqldump_args="$mysqldump_args --quick"
+
+mysqldump_args="$mysqldump_args $database"
+
+
+
+###############################################################################
+# dump database structure 
+###############################################################################
+echo "Dumping database structure..."
+cmd="$mysqldump_path --no-data -r $struct_tmp_file $mysqldump_args" 
+
+if [ -n "$verbose" ]; then
+	echo $cmd
+fi
+$cmd
+
+if [ $? -ne 0 ]; then
+	echo "Failed to dump structure. Aborting."
+	cleanup
+	exit 2
+fi
+
+###############################################################################
+# dump database data
+###############################################################################
+echo "Dumping database data..."
+cmd="$mysqldump_path --no-create-info -r $data_tmp_file $mysqldump_args"
+
+if [ -n "$verbose" ]; then
+	echo $cmd
+fi
+$cmd
+
+if [ $? -ne 0 ]; then
+   echo "Failed to dump data. Aborting."
+   cleanup
+   exit 3
+fi
+
+
+
+###############################################################################
+# replace charset in tables
+###############################################################################
+
+# The create table statements in the file may specify a character set. Replace
+# any references to latin1
+
+echo "Replacing charset..."
+sed "s/DEFAULT CHARACTER SET latin1/DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci/" < $struct_tmp_file | sed "s/DEFAULT CHARSET=latin1/DEFAULT CHARSET=utf8/" > $fixed_struct_tmp_file
+
+if [ $? -ne 0 ]; then
+   echo "Failed to replace charset. Aborting."
+   cleanup
+   exit 4
+fi
+
+
+###############################################################################
+# Concatenate files
+###############################################################################
+
+echo "Building output file..."
+if [ -z "$compress" ]; then
+	cat $fixed_struct_tmp_file $data_tmp_file > $output_file
+else
+	cat $fixed_struct_tmp_file $data_tmp_file | gzip > $output_file
+fi
+
+cleanup
+echo "Done."
+echo "Remember to use --default-character-set utf8 with mysql when importing!"
+echo
