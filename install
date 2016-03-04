@@ -1,0 +1,25 @@
+#!/bin/bash
+
+url=https://raw.github.com/besherman/mysql-export/master/mysql-export
+dir=/usr/local/bin
+bin=${dir}/mysql-export
+
+if [ ! -w "$dir" ]; then
+	echo "You do not have write permissions for $dir. Aborting.";
+	exit 1
+fi
+
+wget $url -q -O $bin --no-check-certificate
+
+if [ $? -ne 0 ]; then
+	echo "Failed to download file. Aborting."
+	exit 1 
+fi
+
+chmod +x $bin
+
+if [ $? -ne 0 ]; then
+   echo "Failed make file executable. Aborting."
+   exit 1
+fi
+
